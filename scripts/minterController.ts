@@ -1,3 +1,4 @@
+import { TonClient4 } from '@ton/ton';
 import { Address, beginCell, Cell, fromNano, OpenedContract, toNano } from '@ton/core';
 import { compile, sleep, NetworkProvider, UIProvider} from '@ton/blueprint';
 import { JettonMinter } from '../wrappers/JettonMinter';
@@ -7,14 +8,11 @@ let minterContract:OpenedContract<JettonMinter>;
 const adminActions  = ['Mint', 'Change admin'];
 const userActions   = ['Info', 'Quit'];
 
-
-
-const failedTransMessage = (ui:UIProvider) => {
+const failedTransMessage = (ui: UIProvider) => {
     ui.write("Failed to get indication of transaction completion from API!\nCheck result manually, or try again\n");
-
 };
 
-const infoAction = async (provider:NetworkProvider, ui:UIProvider) => {
+const infoAction = async (provider: NetworkProvider, ui: UIProvider) => {
     const jettonData = await minterContract.getJettonData();
     ui.write("Jetton info:\n\n");
     ui.write(`Admin:${jettonData.adminAddress}\n`);
@@ -25,51 +23,82 @@ const infoAction = async (provider:NetworkProvider, ui:UIProvider) => {
         displayContentCell(jettonData.content, ui);
     }
 };
-const changeAdminAction = async(provider:NetworkProvider, ui:UIProvider) => {
-    let retry:boolean;
-    let newAdmin:Address;
+const changeAdminAction = async(provider: NetworkProvider, ui: UIProvider) => {
+    let retry: boolean;
+    let newAdmin: Address;
     let curAdmin = await minterContract.getAdminAddress();
     do {
         retry = false;
         newAdmin = await promptAddress('Please specify new admin address:', ui);
-        if(newAdmin.equals(curAdmin)) {
+        if (newAdmin.equals(curAdmin)) {
             retry = true;
             ui.write("Address specified matched current admin address!\nPlease pick another one.\n");
-        }
-        else {
+        } else {
             ui.write(`New admin address is going to be:${newAdmin}\nKindly double check it!\n`);
             retry = !(await promptBool('Is it ok?(yes/no)', ['yes', 'no'], ui));
         }
     } while(retry);
+    
+    // const curState = await provider.api().getContractState(minterContract.address);
+    // if(curState.lastTransaction === null)
+    //     throw("Last transaction can't be null on deployed contract");
 
-    const curState = await provider.api().getContractState(minterContract.address);
-    if(curState.lastTransaction === null)
-        throw("Last transaction can't be null on deployed contract");
+    // await minterContract.sendChangeAdmin(provider.sender(), newAdmin);
+    // const transDone = await waitForTransaction(provider,
+    //                                            minterContract.address,
+    //                                            curState.lastTransaction.lt,
+    //                                            10);
+    // if(transDone) {
+    //     const adminAfter = await minterContract.getAdminAddress();
+    //     if(adminAfter.equals(newAdmin)){
+    //         ui.write("Admin changed successfully");
+    //     }
+    //     else {
+    //         ui.write("Admin address hasn't changed!\nSomething went wrong!\n");
+    //     }
+    // }
+    // else {
+    // }
 
-    await minterContract.sendChangeAdmin(provider.sender(), newAdmin);
-    const transDone = await waitForTransaction(provider,
-                                               minterContract.address,
-                                               curState.lastTransaction.lt,
-                                               10);
-    if(transDone) {
-        const adminAfter = await minterContract.getAdminAddress();
-        if(adminAfter.equals(newAdmin)){
-            ui.write("Admin changed successfully");
-        }
-        else {
-            ui.write("Admin address hasn't changed!\nSomething went wrong!\n");
-        }
-    }
-    else {
+    // TonClient4로 강제 캐스팅
+    const api = provider.api() as TonClient4;
+
+    // 블록 seqno 가져오기
+    const seqno = (await api.getLastBlock()).last.seqno;
+    // 계정 상태 가져오기
+    const accountInfo = await api.getAccount(seqno, minterContract.address);
+
+    // 상태가 active일 경우 last transaction 가져오기
+    if (accountInfo.account.state.type === "active" && accountInfo.account.last !== null) {
+        const lastTransactionLT = BigInt(accountInfo.account.last.lt);
+
+        // Admin 변경 로직
+        await minterContract.sendChangeAdmin(provider.sender(), newAdmin);
+
+        // Transaction 대기 (lastTransactionLT를 문자열로 변환)
+        const transDone = await waitForTransaction(provider, minterContract.address, lastTransactionLT.toString(), 10);
+        
+        if (transDone) {
+            const adminAfter = await minterContract.getAdminAddress();
+            if (adminAfter.equals(newAdmin)) {
+                ui.write("Admin changed successfully");
+            } else {
+                ui.write("Admin address hasn't changed! Something went wrong.");
             }
+        } else {
+            ui.write("Transaction failed or timed out.");
+        }
+    } else {
+        throw new Error("Contract is not active or last transaction info is missing.");
+    }
 };
 
 const mintAction = async (provider:NetworkProvider, ui:UIProvider) => {
     const sender = provider.sender();
-    let retry:boolean;
-    let mintAddress:Address;
-    let mintAmount:string;
-    let forwardAmount:string;
+    let retry: boolean;
+    let mintAddress: Address;
+    let mintAmount: string;
+    let forwardAmount: string;
 
     do {
         retry = false;
@@ -82,33 +111,73 @@ const mintAction = async (provider:NetworkProvider, ui:UIProvider) => {
 
     ui.write(`Minting ${mintAmount} to ${mintAddress}\n`);
     const supplyBefore = await minterContract.getTotalSupply();
-    const nanoMint     = toNano(mintAmount);
-    const curState     = await provider.api().getContractState(minterContract.address);
+    const nanoMint = toNano(mintAmount);
 
-    if(curState.lastTransaction === null)
-        throw("Last transaction can't be null on deployed contract");
+    // const curState = await provider.api().getContractState(minterContract.address);
 
-    const res = await minterContract.sendMint(sender,
-                                              mintAddress,
-                                              nanoMint,
-                                              toNano('0.05'),
-                                              toNano('0.1'));
-    const gotTrans = await waitForTransaction(provider,
-                                              minterContract.address,
-                                              curState.lastTransaction.lt,
-                                              10);
-    if(gotTrans) {
-        const supplyAfter = await minterContract.getTotalSupply();
+    // if(curState.lastTransaction === null)
+    //     throw("Last transaction can't be null on deployed contract");
 
-        if(supplyAfter == supplyBefore + nanoMint) {
-            ui.write("Mint successfull!\nCurrent supply:" + fromNano(supplyAfter));
+    // const res = await minterContract.sendMint(sender,
+    //                                           mintAddress,
+    //                                           nanoMint,
+    //                                           toNano('0.05'),
+    //                                           toNano('0.1'));
+    // const gotTrans = await waitForTransaction(provider,
+    //                                           minterContract.address,
+    //                                           curState.lastTransaction.lt,
+    //                                           10);
+    // if(gotTrans) {
+    //     const supplyAfter = await minterContract.getTotalSupply();
+
+    //     if(supplyAfter == supplyBefore + nanoMint) {
+    //         ui.write("Mint successfull!\nCurrent supply:" + fromNano(supplyAfter));
+    //     }
+    //     else {
+    //         ui.write("Mint failed!");
+    //     }
+    // }
+    // else {
+    //     failedTransMessage(ui);
+    // }
+
+    // TonClient4로 강제 캐스팅
+    const api = provider.api() as TonClient4;
+
+    // 블록 seqno 가져오기
+    const seqno = (await api.getLastBlock()).last.seqno;
+    // 계정 상태 가져오기
+    const accountInfo = await api.getAccount(seqno, minterContract.address);
+
+    // 상태가 active일 경우 last transaction 가져오기
+    if (accountInfo.account.state.type === "active" && accountInfo.account.last !== null) {
+        const lastTransactionLT = BigInt(accountInfo.account.last.lt);
+
+        // Mint 토큰 전송
+        const res = await minterContract.sendMint(
+            sender,
+            mintAddress,
+            nanoMint,
+            toNano('0.05'),
+            toNano('0.1')
+        );
+
+        // Transaction 대기 (lastTransactionLT를 문자열로 변환)
+        const gotTrans = await waitForTransaction(provider, minterContract.address, lastTransactionLT.toString(), 10);
+
+        if (gotTrans) {
+            const supplyAfter = await minterContract.getTotalSupply();
+
+            if (supplyAfter == supplyBefore + nanoMint) {
+                ui.write("Mint successfull!\nCurrent supply:" + fromNano(supplyAfter));
+            } else {
+                ui.write("Mint failed!");
+            }
+        } else {
+            failedTransMessage(ui);
         }
-        else {
-            ui.write("Mint failed!");
-        }
-    }
-    else {
-        failedTransMessage(ui);
+    } else {
+        throw new Error("Contract is not active or last transaction info is missing.");
     }
 }
 
@@ -116,38 +185,59 @@ export async function run(provider: NetworkProvider) {
     const ui = provider.ui();
     const sender = provider.sender();
     const hasSender = sender.address !== undefined;
-    const api    = provider.api()
+    //const api = provider.api();
+    const api = provider.api() as TonClient4;
     const minterCode = await compile('JettonMinter');
-    let   done   = false;
-    let   retry:boolean;
-    let   minterAddress:Address;
+    let done   = false;
+    let retry:boolean;
+    let minterAddress:Address;
 
     do {
         retry = false;
         minterAddress = await promptAddress('Please enter minter address:', ui);
-        const contractState = await api.getContractState(minterAddress);
-        if(contractState.state !== "active" || contractState.code == null) {
+
+        // const contractState = await api.getContractState(minterAddress);
+        // if(contractState.state !== "active" || contractState.code == null) {
+        //     retry = true;
+        //     ui.write("This contract is not active!\nPlease use another address, or deploy it firs");
+        // }
+        // else {
+        //     const stateCode = Cell.fromBoc(contractState.code)[0];
+        //     if(!stateCode.equals(minterCode)) {
+        //         ui.write("Contract code differs from the current contract version!\n");
+        //         const resp = await ui.choose("Use address anyway", ["Yes", "No"], (c) => c);
+        //         retry = resp == "No";
+        //     }
+        // }
+
+        // 블록 seqno 가져오기
+        const seqno = (await api.getLastBlock()).last.seqno;
+        // 계정 상태 가져오기
+        const accountInfo = await api.getAccount(seqno, minterAddress);
+
+        // 계약 상태 확인
+        if (accountInfo.account.state.type !== "active" || accountInfo.account.state.code == null) {
             retry = true;
-            ui.write("This contract is not active!\nPlease use another address, or deploy it firs");
-        }
-        else {
-            const stateCode = Cell.fromBoc(contractState.code)[0];
-            if(!stateCode.equals(minterCode)) {
+            ui.write("This contract is not active or not deployed!\nPlease use another address, or deploy it first.");
+        } else {
+            // state.code는 base64로 인코딩된 코드이므로 이를 BOC로 변환
+            const stateCode = Cell.fromBase64(accountInfo.account.state.code);
+            if (!stateCode.equals(minterCode)) {
                 ui.write("Contract code differs from the current contract version!\n");
                 const resp = await ui.choose("Use address anyway", ["Yes", "No"], (c) => c);
                 retry = resp == "No";
             }
         }
+
     } while(retry);
 
     minterContract = provider.open(JettonMinter.createFromAddress(minterAddress));
     const isAdmin  = hasSender ? (await minterContract.getAdminAddress()).equals(sender.address) : true;
     let actionList:string[];
-    if(isAdmin) {
+    if (isAdmin) {
         actionList = [...adminActions, ...userActions];
         ui.write("Current wallet is minter admin!\n");
-    }
-    else {
+    } else {
         actionList = userActions;
         ui.write("Current wallet is not admin!\nAvaliable actions restricted\n");
     }
